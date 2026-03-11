@@ -1,0 +1,661 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import os
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ============================================================
+# 配置
+# ============================================================
+st.set_page_config(
+    page_title="抖音作者数据看板",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+DATA_DIR = Path("data")
+
+# ============================================================
+# 工具函数
+# ============================================================
+
+@st.cache_data
+def parse_duration_to_minutes(text):
+    """将 '5小时59分钟53秒' 格式转为总分钟数（浮点）"""
+    if pd.isna(text) or str(text).strip() in ('', '-', '0'):
+        return 0.0
+    text = str(text)
+    hours = 0
+    minutes = 0
+    seconds = 0
+    h_match = re.search(r'(\d+)小时', text)
+    m_match = re.search(r'(\d+)分钟', text)
+    s_match = re.search(r'(\d+)秒', text)
+    if h_match:
+        hours = int(h_match.group(1))
+    if m_match:
+        minutes = int(m_match.group(1))
+    if s_match:
+        seconds = int(s_match.group(1))
+    return hours * 60 + minutes + seconds / 60
+
+
+def parse_duration_col(series):
+    """对整列进行时长解析"""
+    return series.apply(parse_duration_to_minutes)
+
+
+def safe_numeric(series):
+    """安全转为数值"""
+    return pd.to_numeric(series, errors='coerce').fillna(0)
+
+
+@st.cache_data
+def load_single_csv(filepath):
+    """加载单个CSV文件"""
+    df = pd.read_csv(filepath, dtype={'主播ID': str, '抖音号': str, '抖音号（原）': str,
+                                       '火山号': str, '火山号（原）': str, '西瓜号': str})
+    return df
+
+
+def process_dataframe(df, date_label=None):
+    """处理DataFrame：解析时长、转换数值"""
+    df = df.copy()
+
+    # 添加日期标签
+    if date_label:
+        df['数据日期'] = date_label
+
+    # 时长列解析
+    duration_cols = ['开播总时长', '开播有效时长', 'feed看播时长']
+    for col in duration_cols:
+        if col in df.columns:
+            df[col + '_分钟'] = parse_duration_col(df[col])
+
+    # 数值列转换
+    numeric_cols = ['粉丝数', '涨粉', '人气峰值', '作品数', '视频播放量',
+                    '视频点赞量', '视频评论量', 'feed_acu', '分成比-直播音浪收益',
+                    '视频个播有效天']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = safe_numeric(df[col])
+
+    return df
+
+
+def get_available_dates():
+    """获取 data/ 文件夹下所有CSV文件的日期列表"""
+    if not DATA_DIR.exists():
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        return []
+    files = sorted(DATA_DIR.glob("*.csv"))
+    dates = []
+    for f in files:
+        # 尝试从文件名提取日期
+        name = f.stem  # 去掉.csv
+        # 支持格式: 2026-03-10 或 20260310
+        try:
+            d = datetime.strptime(name, "%Y-%m-%d").date()
+            dates.append((d, f))
+        except ValueError:
+            try:
+                d = datetime.strptime(name, "%Y%m%d").date()
+                dates.append((d, f))
+            except ValueError:
+                # 无法解析日期，使用文件名
+                dates.append((name, f))
+    return dates
+
+
+@st.cache_data
+def load_all_data():
+    """加载所有日期的CSV数据"""
+    date_files = get_available_dates()
+    if not date_files:
+        return pd.DataFrame()
+
+    all_dfs = []
+    for date_label, filepath in date_files:
+        df = load_single_csv(filepath)
+        df = process_dataframe(df, date_label=str(date_label))
+        all_dfs.append(df)
+
+    if all_dfs:
+        return pd.concat(all_dfs, ignore_index=True)
+    return pd.DataFrame()
+
+
+def load_latest_data():
+    """加载最新一天的数据"""
+    date_files = get_available_dates()
+    if not date_files:
+        return pd.DataFrame()
+    latest_date, latest_file = date_files[-1]
+    df = load_single_csv(latest_file)
+    df = process_dataframe(df, date_label=str(latest_date))
+    return df
+
+
+# ============================================================
+# 侧边栏
+# ============================================================
+st.sidebar.title("📊 抖音作者数据看板")
+st.sidebar.markdown("---")
+
+# 上传新CSV
+st.sidebar.subheader("📁 上传CSV数据")
+uploaded_file = st.sidebar.file_uploader("上传每日CSV文件", type=['csv'])
+if uploaded_file:
+    save_name = st.sidebar.text_input("保存文件名（如 2026-03-11）",
+                                       value=datetime.now().strftime("%Y-%m-%d"))
+    if st.sidebar.button("💾 保存文件"):
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        save_path = DATA_DIR / f"{save_name}.csv"
+        with open(save_path, 'wb') as f:
+            f.write(uploaded_file.getbuffer())
+        st.sidebar.success(f"✅ 已保存到 {save_path}")
+        st.cache_data.clear()
+        st.rerun()
+
+st.sidebar.markdown("---")
+
+# 页面导航
+page = st.sidebar.radio("📑 选择页面", [
+    "🏠 总览仪表盘",
+    "🏆 作者排行榜",
+    "👤 单作者详情",
+    "📈 趋势分析",
+    "🔧 自定义运算"
+])
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"数据文件夹：{DATA_DIR.absolute()}")
+date_files = get_available_dates()
+st.sidebar.caption(f"已有 {len(date_files)} 天数据")
+
+# ============================================================
+# 检查数据
+# ============================================================
+if not date_files:
+    st.warning("⚠️ 还没有数据！请通过左侧边栏上传CSV文件，或将CSV文件放到 `data/` 文件夹中。")
+    st.info("📌 文件命名建议：`2026-03-11.csv` 格式（日期.csv）")
+    st.stop()
+
+# ============================================================
+# 页面1：总览仪表盘
+# ============================================================
+if page == "🏠 总览仪表盘":
+    st.title("🏠 总览仪表盘")
+
+    # 加载最新数据
+    df = load_latest_data()
+    if df.empty:
+        st.warning("暂无数据")
+        st.stop()
+
+    latest_date = df['数据日期'].iloc[0] if '数据日期' in df.columns else "未知"
+    st.caption(f"📅 数据日期：{latest_date} | 👥 作者总数：{len(df)}")
+
+    # KPI 卡片
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+
+    with col1:
+        st.metric("👥 作者总数", f"{len(df):,}")
+    with col2:
+        # 今日开播人数（视频个播有效天 > 0）
+        live_count = (df['视频个播有效天'] > 0).sum() if '视频个播有效天' in df.columns else 0
+        st.metric("🎙️ 今日开播", f"{live_count:,}")
+    with col3:
+        total_fans_gain = df['涨粉'].sum() if '涨粉' in df.columns else 0
+        st.metric("📈 总涨粉", f"{int(total_fans_gain):,}")
+    with col4:
+        avg_peak = df['人气峰值'].mean() if '人气峰值' in df.columns else 0
+        st.metric("🔥 平均人气峰值", f"{avg_peak:.0f}")
+    with col5:
+        total_views = df['视频播放量'].sum() if '视频播放量' in df.columns else 0
+        st.metric("👁️ 总播放量", f"{int(total_views):,}")
+    with col6:
+        total_works = df['作品数'].sum() if '作品数' in df.columns else 0
+        st.metric("🎬 总作品数", f"{int(total_works):,}")
+
+    st.markdown("---")
+
+    # 图表行
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        st.subheader("运营经纪人 - 作者分布")
+        if '运营经纪人' in df.columns:
+            agent_counts = df['运营经纪人'].value_counts().head(15)
+            fig = px.bar(x=agent_counts.index, y=agent_counts.values,
+                         labels={'x': '运营经纪人', 'y': '作者数'},
+                         color=agent_counts.values, color_continuous_scale='Blues')
+            fig.update_layout(height=400, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+    with chart_col2:
+        st.subheader("签约类型分布")
+        if '签约类型' in df.columns:
+            type_counts = df['签约类型'].value_counts()
+            fig = px.pie(values=type_counts.values, names=type_counts.index,
+                         hole=0.4)
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # 第二行图表
+    chart_col3, chart_col4 = st.columns(2)
+
+    with chart_col3:
+        st.subheader("人气峰值 Top 20")
+        if '人气峰值' in df.columns and '主播昵称' in df.columns:
+            top20 = df.nlargest(20, '人气峰值')[['主播昵称', '人气峰值']]
+            fig = px.bar(top20, x='人气峰值', y='主播昵称', orientation='h',
+                         color='人气峰值', color_continuous_scale='Reds')
+            fig.update_layout(height=500, yaxis={'autorange': 'reversed'})
+            st.plotly_chart(fig, use_container_width=True)
+
+    with chart_col4:
+        st.subheader("涨粉 Top 20")
+        if '涨粉' in df.columns and '主播昵称' in df.columns:
+            top20 = df.nlargest(20, '涨粉')[['主播昵称', '涨粉']]
+            fig = px.bar(top20, x='涨粉', y='主播昵称', orientation='h',
+                         color='涨粉', color_continuous_scale='Greens')
+            fig.update_layout(height=500, yaxis={'autorange': 'reversed'})
+            st.plotly_chart(fig, use_container_width=True)
+
+    # 开播时长分布
+    st.subheader("开播有效时长分布（分钟）")
+    if '开播有效时长_分钟' in df.columns:
+        fig = px.histogram(df, x='开播有效时长_分钟', nbins=50,
+                           labels={'开播有效时长_分钟': '有效时长（分钟）'},
+                           color_discrete_sequence=['#636EFA'])
+        fig.update_layout(height=350)
+        st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================
+# 页面2：作者排行榜
+# ============================================================
+elif page == "🏆 作者排行榜":
+    st.title("🏆 作者排行榜")
+
+    # 选择日期
+    date_options = [str(d) for d, f in date_files]
+    selected_date = st.selectbox("选择日期", date_options, index=len(date_options) - 1)
+
+    # 加载对应日期数据
+    date_file_map = {str(d): f for d, f in date_files}
+    df = load_single_csv(date_file_map[selected_date])
+    df = process_dataframe(df, date_label=selected_date)
+
+    st.caption(f"📅 {selected_date} | 👥 {len(df)} 位作者")
+
+    # 筛选条件
+    with st.expander("🔍 筛选条件", expanded=True):
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+
+        with filter_col1:
+            if '运营经纪人' in df.columns:
+                agents = ['全部'] + sorted(df['运营经纪人'].dropna().unique().tolist())
+                sel_agent = st.selectbox("运营经纪人", agents)
+                if sel_agent != '全部':
+                    df = df[df['运营经纪人'] == sel_agent]
+
+        with filter_col2:
+            if '签约类型' in df.columns:
+                types = ['全部'] + sorted(df['签约类型'].dropna().unique().tolist())
+                sel_type = st.selectbox("签约类型", types)
+                if sel_type != '全部':
+                    df = df[df['签约类型'] == sel_type]
+
+        with filter_col3:
+            if '招募经纪人' in df.columns:
+                recruiters = ['全部'] + sorted(df['招募经纪人'].dropna().unique().tolist())
+                sel_recruiter = st.selectbox("招募经纪人", recruiters)
+                if sel_recruiter != '全部':
+                    df = df[df['招募经纪人'] == sel_recruiter]
+
+        with filter_col4:
+            # 搜索作者
+            search_text = st.text_input("🔎 搜索作者昵称")
+            if search_text:
+                df = df[df['主播昵称'].str.contains(search_text, case=False, na=False)]
+
+    # 排序
+    sort_col1, sort_col2 = st.columns([3, 1])
+    numeric_cols_for_sort = ['粉丝数', '涨粉', '人气峰值', '视频播放量', '视频点赞量',
+                              '视频评论量', '作品数', 'feed_acu',
+                              '开播总时长_分钟', '开播有效时长_分钟', 'feed看播时长_分钟']
+    available_sort_cols = [c for c in numeric_cols_for_sort if c in df.columns]
+
+    with sort_col1:
+        sort_by = st.selectbox("排序字段", available_sort_cols,
+                                index=available_sort_cols.index('人气峰值') if '人气峰值' in available_sort_cols else 0)
+    with sort_col2:
+        sort_order = st.radio("排序", ["降序", "升序"], horizontal=True)
+
+    df_sorted = df.sort_values(sort_by, ascending=(sort_order == "升序"))
+
+    # 选择显示列
+    display_default = ['主播昵称', '粉丝数', '涨粉', '人气峰值', '开播有效时长_分钟',
+                       '视频播放量', '视频点赞量', '视频评论量', '作品数', 'feed_acu',
+                       '运营经纪人', '签约类型']
+    available_display = [c for c in display_default if c in df_sorted.columns]
+
+    selected_display = st.multiselect("显示列", df_sorted.columns.tolist(),
+                                       default=available_display)
+
+    st.caption(f"筛选后共 {len(df_sorted)} 位作者")
+
+    # 显示表格
+    st.dataframe(
+        df_sorted[selected_display].reset_index(drop=True),
+        use_container_width=True,
+        height=600
+    )
+
+    # 导出
+    csv_data = df_sorted[selected_display].to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 导出当前筛选结果(CSV)", csv_data,
+                        file_name=f"排行榜_{selected_date}.csv", mime="text/csv")
+
+
+# ============================================================
+# 页面3：单作者详情
+# ============================================================
+elif page == "👤 单作者详情":
+    st.title("👤 单作者详情")
+
+    # 加载所有数据
+    all_data = load_all_data()
+    if all_data.empty:
+        st.warning("暂无数据")
+        st.stop()
+
+    # 获取作者列表（用最新数据）
+    latest_df = load_latest_data()
+    author_list = latest_df['主播昵称'].dropna().unique().tolist() if '主播昵称' in latest_df.columns else []
+
+    # 搜索选择作者
+    selected_author = st.selectbox("选择作者", sorted(author_list),
+                                    index=0 if author_list else None,
+                                    placeholder="输入搜索...")
+
+    if selected_author:
+        author_all = all_data[all_data['主播昵称'] == selected_author].copy()
+
+        if author_all.empty:
+            st.warning("未找到该作者数据")
+            st.stop()
+
+        # 最新一天的数据
+        author_latest = author_all.sort_values('数据日期').iloc[-1]
+
+        # 基本信息卡片
+        st.subheader(f"📌 {selected_author}")
+
+        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+        with info_col1:
+            st.metric("粉丝数", f"{int(author_latest.get('粉丝数', 0)):,}")
+        with info_col2:
+            st.metric("今日涨粉", f"{int(author_latest.get('涨粉', 0)):,}")
+        with info_col3:
+            st.metric("人气峰值", f"{int(author_latest.get('人气峰值', 0)):,}")
+        with info_col4:
+            st.metric("视频播放量", f"{int(author_latest.get('视频播放量', 0)):,}")
+
+        st.markdown("---")
+
+        # 全部字段信息
+        with st.expander("📋 全部字段详情", expanded=False):
+            # 转置显示
+            detail_df = pd.DataFrame({
+                '字段': author_latest.index,
+                '值': author_latest.values
+            })
+            st.dataframe(detail_df, use_container_width=True, height=500)
+
+        # 多日趋势（如果有多天数据）
+        if len(author_all) > 1:
+            st.subheader("📈 历史趋势")
+
+            trend_metrics = ['粉丝数', '涨粉', '人气峰值', '视频播放量', '视频点赞量',
+                             '视频评论量', '作品数', 'feed_acu',
+                             '开播有效时长_分钟', 'feed看播时长_分钟']
+            available_trends = [c for c in trend_metrics if c in author_all.columns]
+
+            selected_trend = st.multiselect("选择指标", available_trends,
+                                             default=available_trends[:3])
+
+            if selected_trend:
+                author_trend = author_all.sort_values('数据日期')
+                for metric in selected_trend:
+                    fig = px.line(author_trend, x='数据日期', y=metric,
+                                  title=metric, markers=True)
+                    fig.update_layout(height=300)
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("💡 目前只有1天数据，上传更多天的CSV后可查看趋势变化")
+
+        # 该作者历史数据表格
+        st.subheader("📊 历史数据表格")
+        st.dataframe(author_all.sort_values('数据日期', ascending=False),
+                      use_container_width=True)
+
+
+# ============================================================
+# 页面4：趋势分析
+# ============================================================
+elif page == "📈 趋势分析":
+    st.title("📈 趋势分析")
+
+    all_data = load_all_data()
+    if all_data.empty:
+        st.warning("暂无数据")
+        st.stop()
+
+    unique_dates = sorted(all_data['数据日期'].unique())
+
+    if len(unique_dates) < 2:
+        st.info("💡 趋势分析需要至少2天的数据。目前只有1天，请上传更多日期的CSV文件。")
+
+        # 仍可以显示当天的汇总
+        st.subheader(f"📅 {unique_dates[0]} 数据汇总")
+        df = all_data[all_data['数据日期'] == unique_dates[0]]
+
+        summary_metrics = ['粉丝数', '涨粉', '人气峰值', '视频播放量', '视频点赞量',
+                           '视频评论量', '作品数', 'feed_acu', '开播有效时长_分钟']
+        available_metrics = [c for c in summary_metrics if c in df.columns]
+
+        summary = {}
+        for m in available_metrics:
+            summary[m] = {
+                '总和': df[m].sum(),
+                '平均值': df[m].mean(),
+                '中位数': df[m].median(),
+                '最大值': df[m].max(),
+                '最小值': df[m].min()
+            }
+        summary_df = pd.DataFrame(summary).T
+        st.dataframe(summary_df, use_container_width=True)
+        st.stop()
+
+    # 汇总方式
+    agg_col1, agg_col2 = st.columns([1, 3])
+    with agg_col1:
+        agg_method = st.radio("汇总粒度", ["日", "周", "月"])
+
+    # 筛选条件
+    with st.expander("🔍 筛选"):
+        f1, f2 = st.columns(2)
+        with f1:
+            if '运营经纪人' in all_data.columns:
+                agents = ['全部'] + sorted(all_data['运营经纪人'].dropna().unique().tolist())
+                sel_agent = st.selectbox("运营经纪人", agents, key="trend_agent")
+        with f2:
+            if '签约类型' in all_data.columns:
+                types = ['全部'] + sorted(all_data['签约类型'].dropna().unique().tolist())
+                sel_type = st.selectbox("签约类型", types, key="trend_type")
+
+    filtered = all_data.copy()
+    if '运营经纪人' in filtered.columns and sel_agent != '全部':
+        filtered = filtered[filtered['运营经纪人'] == sel_agent]
+    if '签约类型' in filtered.columns and sel_type != '全部':
+        filtered = filtered[filtered['签约类型'] == sel_type]
+
+    # 转换日期
+    filtered['日期'] = pd.to_datetime(filtered['数据日期'], errors='coerce')
+    filtered = filtered.dropna(subset=['日期'])
+
+    if agg_method == "周":
+        filtered['周期'] = filtered['日期'].dt.to_period('W').astype(str)
+    elif agg_method == "月":
+        filtered['周期'] = filtered['日期'].dt.to_period('M').astype(str)
+    else:
+        filtered['周期'] = filtered['数据日期']
+
+    # 选择指标
+    trend_metrics = ['粉丝数', '涨粉', '人气峰值', '视频播放量', '视频点赞量',
+                     '视频评论量', '作品数', 'feed_acu', '开播有效时长_分钟', 'feed看播时长_分钟']
+    available_metrics = [c for c in trend_metrics if c in filtered.columns]
+
+    selected_metrics = st.multiselect("选择分析指标", available_metrics,
+                                       default=available_metrics[:4])
+
+    # 汇总方式
+    agg_func = st.radio("汇总方式", ["总和", "平均值", "中位数"], horizontal=True)
+    agg_map = {"总和": "sum", "平均值": "mean", "中位数": "median"}
+
+    if selected_metrics:
+        grouped = filtered.groupby('周期')[selected_metrics].agg(agg_map[agg_func]).reset_index()
+        grouped = grouped.sort_values('周期')
+
+        for metric in selected_metrics:
+            fig = px.line(grouped, x='周期', y=metric,
+                          title=f"{metric} - {agg_func}（按{agg_method}）",
+                          markers=True)
+            fig.update_layout(height=350)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # 汇总表格
+        st.subheader("📊 汇总数据表")
+        st.dataframe(grouped, use_container_width=True)
+
+        csv_data = grouped.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 导出汇总数据", csv_data,
+                            file_name=f"趋势汇总_{agg_method}.csv", mime="text/csv")
+
+
+# ============================================================
+# 页面5：自定义运算
+# ============================================================
+elif page == "🔧 自定义运算":
+    st.title("🔧 自定义运算")
+
+    df = load_latest_data()
+    if df.empty:
+        st.warning("暂无数据")
+        st.stop()
+
+    st.info("""
+    💡 你可以用已有的数值列创建自定义计算指标。
+
+    **可用的数值列（直接用列名）：**
+    粉丝数、涨粉、人气峰值、视频播放量、视频点赞量、视频评论量、作品数、feed_acu、
+    开播总时长_分钟、开播有效时长_分钟、feed看播时长_分钟、分成比-直播音浪收益、视频个播有效天
+    """)
+
+    # 预设公式
+    st.subheader("📐 预设公式")
+    preset_formulas = {
+        "互动率 = (点赞+评论) / 播放量": {
+            "name": "互动率",
+            "formula": "(视频点赞量 + 视频评论量) / 视频播放量.replace(0, float('nan'))"
+        },
+        "平均每作品播放量 = 播放量 / 作品数": {
+            "name": "平均每作品播放量",
+            "formula": "视频播放量 / 作品数.replace(0, float('nan'))"
+        },
+        "有效开播比 = 有效时长 / 总时长": {
+            "name": "有效开播比",
+            "formula": "开播有效时长_分钟 / 开播总时长_分钟.replace(0, float('nan'))"
+        },
+        "每分钟涨粉 = 涨粉 / 有效时长": {
+            "name": "每分钟涨粉",
+            "formula": "涨粉 / 开播有效时长_分钟.replace(0, float('nan'))"
+        },
+        "每分钟人气 = 人气峰值 / 有效时长": {
+            "name": "每分钟人气",
+            "formula": "人气峰值 / 开播有效时长_分钟.replace(0, float('nan'))"
+        },
+    }
+
+    selected_presets = st.multiselect("选择预设公式", list(preset_formulas.keys()))
+
+    for preset_key in selected_presets:
+        preset = preset_formulas[preset_key]
+        try:
+            # 安全地在DataFrame上下文中计算
+            col_name = preset["name"]
+            if "互动率" in col_name:
+                df[col_name] = (df['视频点赞量'] + df['视频评论量']) / df['视频播放量'].replace(0, float('nan'))
+            elif "平均每作品播放量" in col_name:
+                df[col_name] = df['视频播放量'] / df['作品数'].replace(0, float('nan'))
+            elif "有效开播比" in col_name:
+                df[col_name] = df['开播有效时长_分钟'] / df['开播总时长_分钟'].replace(0, float('nan'))
+            elif "每分钟涨粉" in col_name:
+                df[col_name] = df['涨粉'] / df['开播有效时长_分钟'].replace(0, float('nan'))
+            elif "每分钟人气" in col_name:
+                df[col_name] = df['人气峰值'] / df['开播有效时长_分钟'].replace(0, float('nan'))
+        except Exception as e:
+            st.error(f"计算 {preset_key} 时出错：{e}")
+
+    st.markdown("---")
+
+    # 自定义公式
+    st.subheader("✏️ 自定义公式")
+    st.caption("使用Python/Pandas语法。用 `df['列名']` 引用列。")
+
+    custom_name = st.text_input("新指标名称", placeholder="例如：综合得分")
+    custom_formula = st.text_area("计算公式", placeholder="例如：df['涨粉'] * 0.3 + df['人气峰值'] * 0.7",
+                                   height=80)
+
+    if custom_name and custom_formula:
+        if st.button("▶️ 计算"):
+            try:
+                df[custom_name] = eval(custom_formula)
+                st.success(f"✅ 已计算 '{custom_name}'")
+            except Exception as e:
+                st.error(f"❌ 公式错误：{e}")
+
+    # 显示结果
+    st.markdown("---")
+    st.subheader("📊 结果")
+
+    # 获取所有数值列（包括新计算的）
+    all_numeric = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+    display_cols = ['主播昵称'] + [c for c in all_numeric if c in df.columns]
+    display_cols = [c for c in display_cols if c in df.columns]
+
+    # 排序
+    sort_options = [c for c in all_numeric if c in df.columns]
+    if sort_options:
+        sort_by = st.selectbox("排序字段", sort_options,
+                                index=0, key="custom_sort")
+        df_result = df[display_cols].sort_values(sort_by, ascending=False)
+        st.dataframe(df_result.head(100), use_container_width=True, height=500)
+
+        csv_data = df_result.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 导出结果", csv_data,
+                            file_name="自定义运算结果.csv", mime="text/csv")
+
+
+# ============================================================
+# 底部
+# ============================================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("Made with ❤️ by AI Assistant")
