@@ -19,7 +19,11 @@ st.set_page_config(
 )
 
 DATA_DIR = Path("data")
-TAGS_FILE = Path(r"D:\KOCdata\author_tags.csv")
+_local_tags = Path(r"D:\KOCdata\author_tags.csv")
+if _local_tags.exists():
+    TAGS_FILE = _local_tags
+else:
+    TAGS_FILE = Path(os.path.dirname(__file__)) / "author_tags.csv"
 
 # ============================================================
 # 衍生指标定义（名称 + 公式说明）
