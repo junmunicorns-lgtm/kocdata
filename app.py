@@ -206,15 +206,20 @@ def merge_tags(df, tags_df):
     df = df.copy()
     df['抖音号'] = df['抖音号'].astype(str).str.strip()
 
+    # ★ 修复1：标签表去重，防止 merge 导致数据行数翻倍
+    tags_clean = tags_df.copy()
+    tags_clean['抖音号'] = tags_clean['抖音号'].astype(str).str.strip()
+    tags_clean = tags_clean.drop_duplicates(subset='抖音号', keep='first')
+
     tag_cols_to_merge = ['抖音号']
     for col in MULTI_TAG_FIELDS:
-        if col in tags_df.columns and col not in df.columns:
+        if col in tags_clean.columns and col not in df.columns:
             tag_cols_to_merge.append(col)
-        elif col in tags_df.columns and col in df.columns:
-            tags_df = tags_df.rename(columns={col: f'{col}_标签表'})
+        elif col in tags_clean.columns and col in df.columns:
+            tags_clean = tags_clean.rename(columns={col: f'{col}_标签表'})
             tag_cols_to_merge.append(f'{col}_标签表')
 
-    merged = df.merge(tags_df[tag_cols_to_merge], on='抖音号', how='left')
+    merged = df.merge(tags_clean[tag_cols_to_merge], on='抖音号', how='left')
     return merged
 
 
@@ -281,10 +286,11 @@ def aggregate_by_author(df, days=None):
         if col in df.columns:
             agg_dict[col] = 'sum'
 
+    # ★ 修复2：粉丝数改为 'max' 而不是 'last'，避免排序问题导致取到0
     last_cols = ['粉丝数']
     for col in last_cols:
         if col in df.columns:
-            agg_dict[col] = 'last'
+            agg_dict[col] = 'max'
 
     max_cols = ['人气峰值', 'feed_acu']
     for col in max_cols:
@@ -1189,83 +1195,83 @@ def main():
             sorted_df.index = sorted_df.index + 1
             sorted_df.index.name = "排名"
 
-         # 处理柱状图的赛道颜色：多标签时取第一个赛道作为颜色分组
-        chart_top_df = sorted_df.head(20).copy()
-        if '赛道' in chart_top_df.columns:
-            chart_top_df['赛道_主'] = chart_top_df['赛道'].astype(str).str.split(r'\|').str[0].str.strip()
-            color_field = '赛道_主'
-        else:
-            color_field = None
+            # 处理柱状图的赛道颜色：多标签时取第一个赛道作为颜色分组
+            chart_top_df = sorted_df.head(20).copy()
+            if '赛道' in chart_top_df.columns:
+                chart_top_df['赛道_主'] = chart_top_df['赛道'].astype(str).str.split(r'\|').str[0].str.strip()
+                color_field = '赛道_主'
+            else:
+                color_field = None
 
-        fig_top = px.bar(
-            chart_top_df,
-            x=top_author_col,
-            y=top_sort_by,
-            title=f"垂类TOP — {filter_desc} — 按{top_sort_by}排序 ({top_time})",
-            text=top_sort_by,
-            color=color_field,
-            barmode='group',
-        )
-        fig_top.update_traces(texttemplate='%{text:.2s}', textposition='outside')
-        fig_top.update_layout(xaxis_tickangle=-45, height=500)
-        st.plotly_chart(fig_top, use_container_width=True)
+            fig_top = px.bar(
+                chart_top_df,
+                x=top_author_col,
+                y=top_sort_by,
+                title=f"垂类TOP — {filter_desc} — 按{top_sort_by}排序 ({top_time})",
+                text=top_sort_by,
+                color=color_field,
+                barmode='group',
+            )
+            fig_top.update_traces(texttemplate='%{text:.2s}', textposition='outside')
+            fig_top.update_layout(xaxis_tickangle=-45, height=500)
+            st.plotly_chart(fig_top, use_container_width=True)
 
-        st.markdown("---")
+            st.markdown("---")
 
-        st.subheader("📋 垂类排行表")
+            st.subheader("📋 垂类排行表")
 
-        table_cols = [top_author_col]
-        tag_cols = ['赛道', '标签', '归属', '地域', '特殊人设', '建联方式']
-        tag_cols = [c for c in tag_cols if c in sorted_df.columns]
-        table_cols += tag_cols
+            table_cols = [top_author_col]
+            tag_cols = ['赛道', '标签', '归属', '地域', '特殊人设', '建联方式']
+            tag_cols = [c for c in tag_cols if c in sorted_df.columns]
+            table_cols += tag_cols
 
-        if '统计天数' in sorted_df.columns:
-            table_cols.append('统计天数')
+            if '统计天数' in sorted_df.columns:
+                table_cols.append('统计天数')
 
-        table_cols += base_metrics + duration_cols + derived_metrics
+            table_cols += base_metrics + duration_cols + derived_metrics
 
-        seen = set()
-        table_cols_unique = []
-        for c in table_cols:
-            if c not in seen:
-                table_cols_unique.append(c)
-                seen.add(c)
-        table_cols = table_cols_unique
+            seen = set()
+            table_cols_unique = []
+            for c in table_cols:
+                if c not in seen:
+                    table_cols_unique.append(c)
+                    seen.add(c)
+            table_cols = table_cols_unique
 
-        default_table = [top_author_col]
-        for c in ['赛道', '标签', '粉丝数', '涨粉', '视频播放量',
+            default_table = [top_author_col]
+            for c in ['赛道', '标签', '粉丝数', '涨粉', '视频播放量',
                        '单条播放量', '互动率(%)', 'feed_acu', '直播涨粉率(人/小时)']:
-            if c in table_cols:
+                if c in table_cols:
                     default_table.append(c)
 
-        selected_table_cols = st.multiselect(
-            "选择要显示的列",
-            table_cols,
-            default=default_table,
-            key="top_table_cols"
-        )
-
-        if selected_table_cols:
-            display_top = sorted_df[selected_table_cols].copy()
-
-            rename_map = {}
-            for col in selected_table_cols:
-                if col in DERIVED_METRICS_INFO:
-                    rename_map[col] = f"{col}\n({DERIVED_METRICS_INFO[col]})"
-            display_renamed = display_top.rename(columns=rename_map)
-
-            st.dataframe(display_renamed, use_container_width=True, height=600)
-
-            csv_data = display_top.to_csv(index=True, encoding='utf-8-sig')
-            st.download_button(
-                "📥 导出垂类排行CSV",
-                csv_data,
-                file_name=f"垂类TOP_{filter_desc}_{top_sort_by}_{top_time}.csv",
-                mime="text/csv",
-                key="top_export"
+            selected_table_cols = st.multiselect(
+                "选择要显示的列",
+                table_cols,
+                default=default_table,
+                key="top_table_cols"
             )
-        else:
-            st.info("请至少选择一列")
+
+            if selected_table_cols:
+                display_top = sorted_df[selected_table_cols].copy()
+
+                rename_map = {}
+                for col in selected_table_cols:
+                    if col in DERIVED_METRICS_INFO:
+                        rename_map[col] = f"{col}\n({DERIVED_METRICS_INFO[col]})"
+                display_renamed = display_top.rename(columns=rename_map)
+
+                st.dataframe(display_renamed, use_container_width=True, height=600)
+
+                csv_data = display_top.to_csv(index=True, encoding='utf-8-sig')
+                st.download_button(
+                    "📥 导出垂类排行CSV",
+                    csv_data,
+                    file_name=f"垂类TOP_{filter_desc}_{top_sort_by}_{top_time}.csv",
+                    mime="text/csv",
+                    key="top_export"
+                )
+            else:
+                st.info("请至少选择一列")
 
     # ============================================================
     # 📋 明细数据
